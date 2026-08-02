@@ -98,7 +98,7 @@ jobs:
 
           # Deploy CGI script
           cp cgi-bin/ticks.py ${WEB_PATH}/cgi-bin/ticks.py
-          chmod +x ${WEB_PATH}/cgi-bin/ticks.py
+          #chmod +x ${WEB_PATH}/cgi-bin/ticks.py
 
       - name: Restart tick detector service
         shell: bash

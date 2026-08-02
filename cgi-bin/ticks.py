@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/opt/venvs/tickdetector/bin/python3
 """
 CGI script for /api/ticks endpoint.
 

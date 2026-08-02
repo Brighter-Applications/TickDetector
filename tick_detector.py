@@ -10,6 +10,8 @@ A single Python service that:
    detect the BGS tick.
 4. On tick detection, updates static JSON files served by Apache and records
    the tick in the database.
+5. Provides a Socket.IO WebSocket for real-time tick notifications to
+   connected clients (backwards compatible with the original Node service).
 
 Configuration is via environment variables (see below).
 """
@@ -19,11 +21,13 @@ import logging
 import os
 import signal
 import sys
+import threading
 import time
 import zlib
 from datetime import datetime, timezone, timedelta
 
 import mysql.connector
+import socketio
 import zmq
 
 # ---------------------------------------------------------------------------
@@ -52,6 +56,9 @@ DETECT_INTERVAL = int(os.environ.get("TICK_DETECT_INTERVAL", "60"))
 # Max age of EDDN messages to accept (seconds)
 MAX_MESSAGE_AGE = 6000
 
+# Socket.IO server port (listens on localhost only, proxied by Apache)
+SOCKETIO_PORT = int(os.environ.get("TICK_SOCKETIO_PORT", "9001"))
+
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
@@ -66,6 +73,7 @@ log = logging.getLogger("tick_detector")
 # Globals
 # ---------------------------------------------------------------------------
 running = True
+latest_tick = None  # Holds the most recent tick string for Socket.IO clients
 
 
 def signal_handler(signum, frame):
@@ -77,6 +85,59 @@ def signal_handler(signum, frame):
 signal.signal(signal.SIGTERM, signal_handler)
 signal.signal(signal.SIGINT, signal_handler)
 signal.signal(signal.SIGHUP, signal_handler)
+
+
+# ---------------------------------------------------------------------------
+# Socket.IO server (backwards compatible with original Node tick.js)
+# ---------------------------------------------------------------------------
+sio = socketio.Server(cors_allowed_origins="*", async_mode="threading")
+sio_app = socketio.WSGIApp(sio)
+
+
+@sio.event
+def connect(sid, environ):
+    """On client connect, send the latest known tick as a 'message' event."""
+    if latest_tick:
+        sio.emit("message", latest_tick, to=sid)
+    log.debug(f"Socket.IO client connected: {sid}")
+
+
+@sio.event
+def disconnect(sid):
+    log.debug(f"Socket.IO client disconnected: {sid}")
+
+
+def broadcast_tick(tick_str):
+    """Broadcast a new tick to all connected Socket.IO clients."""
+    sio.emit("message", tick_str)
+    sio.emit("tick", tick_str)
+    log.info(f"Broadcast tick via Socket.IO: {tick_str}")
+
+
+def start_socketio_server():
+    """Run the Socket.IO WSGI server in a background thread."""
+    from werkzeug.serving import make_server as _make_server
+
+    try:
+        from werkzeug.serving import make_server as werkzeug_make_server
+        server = werkzeug_make_server(
+            "127.0.0.1", SOCKETIO_PORT, sio_app,
+            threaded=True,
+        )
+        server.timeout = 0.5
+        log.info(f"Socket.IO server listening on 127.0.0.1:{SOCKETIO_PORT}")
+        while running:
+            server.handle_request()
+        server.server_close()
+    except ImportError:
+        # Fallback to simple wsgiref if werkzeug not available
+        from wsgiref.simple_server import make_server as wsgiref_make_server
+        server = wsgiref_make_server("127.0.0.1", SOCKETIO_PORT, sio_app)
+        server.timeout = 0.5
+        log.info(f"Socket.IO server listening on 127.0.0.1:{SOCKETIO_PORT} (wsgiref)")
+        while running:
+            server.handle_request()
+        server.server_close()
 
 
 # ---------------------------------------------------------------------------
@@ -391,7 +452,8 @@ def purge_old_influence(conn):
 # Static file publishing
 # ---------------------------------------------------------------------------
 def publish_tick(tick_str):
-    """Update the static files served by Apache."""
+    """Update the static files served by Apache and notify WebSocket clients."""
+    global latest_tick
     api_dir = os.path.join(WEB_ROOT, "api")
     os.makedirs(api_dir, exist_ok=True)
 
@@ -402,6 +464,12 @@ def publish_tick(tick_str):
 
     # Update index.html
     update_index_html(tick_str)
+
+    # Update global and broadcast to Socket.IO clients
+    is_new_tick = (latest_tick is not None and tick_str != latest_tick)
+    latest_tick = tick_str
+    if is_new_tick:
+        broadcast_tick(tick_str)
 
     log.info(f"Published tick: {tick_str}")
 
@@ -440,6 +508,14 @@ def update_index_html(tick_str):
             margin: 1rem 0;
             font-family: monospace;
         }}
+        .status {{
+            color: #2ecc71;
+            font-size: 0.85rem;
+            margin: 0.5rem 0;
+        }}
+        .status.disconnected {{
+            color: #e74c3c;
+        }}
         .info {{
             color: #888;
             font-size: 0.9rem;
@@ -447,33 +523,98 @@ def update_index_html(tick_str):
         a {{
             color: #3498db;
         }}
+        .alert {{
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            background: #f39c12;
+            color: #1a1a2e;
+            text-align: center;
+            padding: 1rem;
+            font-weight: bold;
+            font-size: 1.2rem;
+            display: none;
+            z-index: 1000;
+        }}
+        .alert.visible {{
+            display: block;
+        }}
     </style>
 </head>
 <body>
+    <div class="alert" id="alert">New tick detected!</div>
     <div class="container">
         <h1>Elite Dangerous BGS Tick Detector</h1>
         <p class="info">Last detected tick:</p>
         <div class="tick-time" id="tick">{tick_str}</div>
+        <p class="status" id="status">Connecting...</p>
         <p class="info">
             API: <a href="/api/tick">/api/tick</a> |
             <a href="/api/ticks">/api/ticks</a>
         </p>
-        <p class="info">Auto-refreshes every 60 seconds.</p>
+        <p class="info">Live updates via WebSocket.</p>
     </div>
+    <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
     <script>
-        // Poll for updates every 60 seconds
-        setInterval(async () => {{
-            try {{
-                const resp = await fetch('/api/tick');
-                const tick = await resp.json();
-                const el = document.getElementById('tick');
-                if (tick !== el.textContent) {{
-                    el.textContent = tick;
+        const tickEl = document.getElementById('tick');
+        const statusEl = document.getElementById('status');
+        const alertEl = document.getElementById('alert');
+        let firstMessage = true;
+
+        const socket = io(window.location.origin, {{
+            transports: ['websocket', 'polling']
+        }});
+
+        socket.on('connect', () => {{
+            statusEl.textContent = 'Connected (live)';
+            statusEl.className = 'status';
+        }});
+
+        socket.on('disconnect', () => {{
+            statusEl.textContent = 'Disconnected - reconnecting...';
+            statusEl.className = 'status disconnected';
+        }});
+
+        socket.on('message', (data) => {{
+            if (data !== tickEl.textContent) {{
+                tickEl.textContent = data;
+                if (!firstMessage) {{
+                    // New tick detected
                     document.title = 'NEW TICK - Elite Dangerous BGS Tick Detector';
-                    setTimeout(() => {{ document.title = 'Elite Dangerous BGS Tick Detector'; }}, 30000);
+                    alertEl.classList.add('visible');
+                    setTimeout(() => {{
+                        alertEl.classList.remove('visible');
+                        document.title = 'Elite Dangerous BGS Tick Detector';
+                    }}, 30000);
                 }}
-            }} catch (e) {{}}
-        }}, 60000);
+            }}
+            firstMessage = false;
+        }});
+
+        socket.on('tick', (data) => {{
+            // Explicit new tick event (redundant with message, but matches original API)
+            tickEl.textContent = data;
+            document.title = 'NEW TICK - Elite Dangerous BGS Tick Detector';
+            alertEl.classList.add('visible');
+            setTimeout(() => {{
+                alertEl.classList.remove('visible');
+                document.title = 'Elite Dangerous BGS Tick Detector';
+            }}, 30000);
+        }});
+
+        // Fallback: poll every 5 minutes in case WebSocket is disconnected
+        setInterval(async () => {{
+            if (!socket.connected) {{
+                try {{
+                    const resp = await fetch('/api/tick');
+                    const tick = await resp.json();
+                    if (tick !== tickEl.textContent) {{
+                        tickEl.textContent = tick;
+                    }}
+                }} catch (e) {{}}
+            }}
+        }}, 300000);
     </script>
 </body>
 </html>
@@ -486,6 +627,7 @@ def update_index_html(tick_str):
 # Main loop
 # ---------------------------------------------------------------------------
 def main():
+    global latest_tick
     log.info("Starting Elite Dangerous BGS Tick Detector")
     log.info(f"EDDN relay: {EDDN_RELAY}")
     log.info(f"MySQL: {DB_USER}@{DB_HOST}:{DB_PORT}/{DB_NAME}")
@@ -496,12 +638,17 @@ def main():
     conn = get_db_connection()
     ensure_schema(conn)
 
+    # Start Socket.IO server in background thread
+    sio_thread = threading.Thread(target=start_socketio_server, daemon=True)
+    sio_thread.start()
+
     # Publish current latest tick on startup
     cursor = conn.cursor()
     cursor.execute("SELECT `time` FROM ticks ORDER BY `time` DESC LIMIT 1")
     row = cursor.fetchone()
     cursor.close()
     if row:
+        latest_tick = row[0]
         publish_tick(row[0])
 
     # Set up ZeroMQ subscriber

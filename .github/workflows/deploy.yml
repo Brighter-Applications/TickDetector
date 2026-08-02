@@ -20,7 +20,7 @@ name: "Deploy TickDetector"
 on:
   push:
     branches:
-      - master
+      - deploy
 
 permissions:
   contents: read

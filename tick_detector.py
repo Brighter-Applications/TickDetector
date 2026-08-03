@@ -551,7 +551,8 @@ def update_index_html(tick_str):
         <p class="status" id="status">Connecting...</p>
         <p class="info">
             API: <a href="/api/tick">/api/tick</a> |
-            <a href="/api/ticks">/api/ticks</a>
+            <a href="/api/ticks">/api/ticks</a> |
+            <a href="/docs.html">Documentation</a>
         </p>
         <p class="info">Live updates via WebSocket.</p>
     </div>

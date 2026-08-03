@@ -13,11 +13,11 @@ Example:
     /api/ticks?start=2024-01-01&end=2024-06-30
 """
 
-import cgi
 import json
 import os
 import sys
 from datetime import date
+from urllib.parse import parse_qs
 
 import mysql.connector
 
@@ -30,10 +30,11 @@ DB_NAME = os.environ.get("TICK_DB_NAME", "tick_detector")
 
 
 def main():
-    # Parse query parameters
-    params = cgi.FieldStorage()
-    start = params.getvalue("start", "2014-12-16")
-    end = params.getvalue("end", date.today().isoformat())
+    # Parse query parameters from QUERY_STRING environment variable
+    query_string = os.environ.get("QUERY_STRING", "")
+    params = parse_qs(query_string)
+    start = params.get("start", ["2014-12-16"])[0]
+    end = params.get("end", [date.today().isoformat()])[0]
 
     # Basic input validation
     try:

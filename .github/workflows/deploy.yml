@@ -96,6 +96,9 @@ jobs:
             cp www/index.html ${WEB_PATH}/index.html
           fi
 
+          # Deploy static documentation page
+          cp www/docs.html ${WEB_PATH}/docs.html
+
           # Deploy CGI script
           cp cgi-bin/ticks.py ${WEB_PATH}/cgi-bin/ticks.py
           #chmod +x ${WEB_PATH}/cgi-bin/ticks.py

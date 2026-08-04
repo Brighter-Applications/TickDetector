@@ -46,7 +46,7 @@ WEB_ROOT = os.environ.get("TICK_WEB_ROOT", "/var/www/tick.edcd.io")
 EDDN_RELAY = os.environ.get("TICK_EDDN_RELAY", "tcp://eddn.edcd.io:9500")
 
 # Detection parameters (matching the original defaults)
-FRESHNESS = int(os.environ.get("TICK_FRESHNESS", "14400"))  # seconds
+FRESHNESS = int(os.environ.get("TICK_FRESHNESS", "3600"))   # seconds (max delta to qualify)
 THRESHOLD = int(os.environ.get("TICK_THRESHOLD", "5"))       # min cluster size
 DELTA = int(os.environ.get("TICK_DELTA", "7500"))            # DBSCAN epsilon (seconds)
 
@@ -395,13 +395,19 @@ def detect_tick(conn):
     window_start = max(last_tick, datetime.now(timezone.utc) - timedelta(hours=26))
     start_str = window_start.strftime("%Y-%m-%d %H:%M:%S")
 
-    # Query influence changes since window start with valid deltas
+    # Query influence changes since window start with valid deltas.
+    # We require delta > 0 (excludes records where influence appeared to go
+    # backwards in time) AND delta <= FRESHNESS. A tighter freshness window
+    # (e.g. 3600s = 1 hour) eliminates overnight trickle data where the same
+    # system was visited hours apart, keeping only genuine tick-related changes
+    # where a system was re-visited shortly after the tick updated it.
     cursor.execute("""
         SELECT DISTINCT system_id, first_seen, delta
         FROM influence
         WHERE first_seen >= %s
           AND influence > 0
           AND delta IS NOT NULL
+          AND delta > 0
           AND delta <= %s
     """, (start_str, FRESHNESS))
 
@@ -426,22 +432,16 @@ def detect_tick(conn):
     if not clusters:
         return []
 
-    # The Node.js version saves ALL clusters (including cluster[0]) to the ticks
-    # table. This is critical: cluster[0] acts as a "bookmark" that advances the
-    # query window forward, preventing data accumulation across multiple days.
-    # Without saving cluster[0], the search window never advances and all data
-    # eventually merges into one inseparable super-cluster.
-    #
-    # However, only clusters[1:] represent genuinely NEW ticks to announce.
-    # cluster[0] is the "current state" cluster that simply moves the window.
-    #
-    # We return tuples of (tick_time, should_broadcast)
-    all_ticks = []
+    # Only clusters after the first one represent new ticks.
+    # cluster[0] is the "current state" — data points from ongoing activity
+    # since the last tick. Clusters[1:] are genuine new tick detections.
+    new_ticks = []
     for i, cluster in enumerate(clusters):
-        tick_time = datetime.fromtimestamp(cluster[0], tz=timezone.utc)
-        all_ticks.append((tick_time, i >= 1))
+        if i >= 1:
+            tick_time = datetime.fromtimestamp(cluster[0], tz=timezone.utc)
+            new_ticks.append(tick_time)
 
-    return all_ticks
+    return new_ticks
 
 
 def save_tick(conn, tick_time):
@@ -717,9 +717,9 @@ def main():
             try:
                 new_ticks = detect_tick(conn)
                 if new_ticks:
-                    for tick_time, should_broadcast in new_ticks:
+                    for tick_time in new_ticks:
                         tick_str = save_tick(conn, tick_time)
-                        if tick_str and should_broadcast:
+                        if tick_str:
                             log.info(f"New tick detected: {tick_str}")
                             publish_tick(tick_str)
             except mysql.connector.Error as e:

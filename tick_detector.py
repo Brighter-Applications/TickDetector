@@ -415,13 +415,25 @@ def detect_tick(conn):
     # Run DBSCAN
     clusters = dbscan_1d(data, DELTA, THRESHOLD)
 
-    new_ticks = []
-    for i, cluster in enumerate(clusters):
-        if i >= 1:  # Skip the first cluster (it's the "current state" before tick)
-            tick_time = datetime.fromtimestamp(cluster[0], tz=timezone.utc)
-            new_ticks.append(tick_time)
+    if not clusters:
+        return []
 
-    return new_ticks
+    # The Node.js version saves ALL clusters (including cluster[0]) to the ticks
+    # table. This is critical: cluster[0] acts as a "bookmark" that advances the
+    # query window forward, preventing data accumulation across multiple days.
+    # Without saving cluster[0], the search window never advances and all data
+    # eventually merges into one inseparable super-cluster.
+    #
+    # However, only clusters[1:] represent genuinely NEW ticks to announce.
+    # cluster[0] is the "current state" cluster that simply moves the window.
+    #
+    # We return tuples of (tick_time, should_broadcast)
+    all_ticks = []
+    for i, cluster in enumerate(clusters):
+        tick_time = datetime.fromtimestamp(cluster[0], tz=timezone.utc)
+        all_ticks.append((tick_time, i >= 1))
+
+    return all_ticks
 
 
 def save_tick(conn, tick_time):
@@ -697,9 +709,9 @@ def main():
             try:
                 new_ticks = detect_tick(conn)
                 if new_ticks:
-                    for tick_time in new_ticks:
+                    for tick_time, should_broadcast in new_ticks:
                         tick_str = save_tick(conn, tick_time)
-                        if tick_str:
+                        if tick_str and should_broadcast:
                             log.info(f"New tick detected: {tick_str}")
                             publish_tick(tick_str)
             except mysql.connector.Error as e:

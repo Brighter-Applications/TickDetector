@@ -328,10 +328,11 @@ def dbscan_1d(data, eps, min_pts):
         if visited[i]:
             continue
 
-        # Find all neighbours within eps
+        # Find all neighbours within eps (strict less-than, matching
+        # the density-clustering npm package's _regionQuery)
         neighbours = []
         for j in range(n):
-            if abs(sorted_data[i][1] - sorted_data[j][1]) <= eps:
+            if abs(sorted_data[i][1] - sorted_data[j][1]) < eps:
                 neighbours.append(j)
 
         if len(neighbours) < min_pts:
@@ -350,7 +351,7 @@ def dbscan_1d(data, eps, min_pts):
 
             point_neighbours = []
             for j in range(n):
-                if abs(sorted_data[point][1] - sorted_data[j][1]) <= eps:
+                if abs(sorted_data[point][1] - sorted_data[j][1]) < eps:
                     point_neighbours.append(j)
 
             if len(point_neighbours) >= min_pts:
@@ -385,9 +386,16 @@ def detect_tick(conn):
     else:
         last_tick = datetime.now(timezone.utc) - timedelta(days=30)
 
-    start_str = last_tick.strftime("%Y-%m-%d %H:%M:%S")
+    # Cap the query window to 26 hours max. This prevents data accumulation
+    # across multiple days from forming one inseparable super-cluster.
+    # The original Node.js version avoided this via a quirk in setInfluence
+    # that artificially reduced observation windows, causing more records to
+    # have large deltas and get filtered out. Rather than replicate that bug,
+    # we limit the window to just over one tick cycle.
+    window_start = max(last_tick, datetime.now(timezone.utc) - timedelta(hours=26))
+    start_str = window_start.strftime("%Y-%m-%d %H:%M:%S")
 
-    # Query influence changes since last tick with valid deltas
+    # Query influence changes since window start with valid deltas
     cursor.execute("""
         SELECT DISTINCT system_id, first_seen, delta
         FROM influence

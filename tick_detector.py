@@ -395,6 +395,8 @@ def detect_tick(conn):
     window_start = max(last_tick, datetime.now(timezone.utc) - timedelta(hours=26))
     start_str = window_start.strftime("%Y-%m-%d %H:%M:%S")
 
+    log.info(f"[detect_tick] last_tick={last_tick_str if row else 'None'}, window_start={start_str}, FRESHNESS={FRESHNESS}, THRESHOLD={THRESHOLD}, DELTA={DELTA}")
+
     # Query influence changes since window start with valid deltas.
     # We require delta > 0 (excludes records where influence appeared to go
     # backwards in time) AND delta <= FRESHNESS. A tighter freshness window
@@ -415,6 +417,7 @@ def detect_tick(conn):
     cursor.close()
 
     if not rows:
+        log.info("[detect_tick] No qualifying rows found")
         return None
 
     # Convert first_seen timestamps to unix epoch for clustering
@@ -426,8 +429,16 @@ def detect_tick(conn):
     if not data:
         return None
 
+    log.info(f"[detect_tick] {len(data)} data points, time range: {datetime.fromtimestamp(min(data), tz=timezone.utc)} to {datetime.fromtimestamp(max(data), tz=timezone.utc)}")
+
     # Run DBSCAN
     clusters = dbscan_1d(data, DELTA, THRESHOLD)
+
+    log.info(f"[detect_tick] DBSCAN found {len(clusters)} clusters, sizes: {[len(c) for c in clusters]}")
+    for i, cluster in enumerate(clusters):
+        cluster_start = datetime.fromtimestamp(cluster[0], tz=timezone.utc)
+        cluster_end = datetime.fromtimestamp(cluster[-1], tz=timezone.utc)
+        log.info(f"[detect_tick]   cluster[{i}]: {len(cluster)} points, {cluster_start} to {cluster_end}")
 
     if not clusters:
         return []

@@ -22,9 +22,9 @@ Environment=TICK_WEB_ROOT=/var/www/tick.edcd.io
 Environment=TICK_EDDN_RELAY=tcp://eddn.edcd.io:9500
 
 # Detection tuning
-Environment=TICK_FRESHNESS=14400
-Environment=TICK_THRESHOLD=5
-Environment=TICK_DELTA=7500
+Environment=TICK_FRESHNESS=3600
+Environment=TICK_THRESHOLD=15
+Environment=TICK_DELTA=5400
 Environment=TICK_DETECT_INTERVAL=60
 
 # Restart behaviour

@@ -47,8 +47,8 @@ EDDN_RELAY = os.environ.get("TICK_EDDN_RELAY", "tcp://eddn.edcd.io:9500")
 
 # Detection parameters (matching the original defaults)
 FRESHNESS = int(os.environ.get("TICK_FRESHNESS", "3600"))   # seconds (max delta to qualify)
-THRESHOLD = int(os.environ.get("TICK_THRESHOLD", "5"))       # min cluster size
-DELTA = int(os.environ.get("TICK_DELTA", "7500"))            # DBSCAN epsilon (seconds)
+THRESHOLD = int(os.environ.get("TICK_THRESHOLD", "15"))      # min cluster size
+DELTA = int(os.environ.get("TICK_DELTA", "5400"))            # DBSCAN epsilon (seconds = 1.5 hours)
 
 # How often to run tick detection (seconds)
 DETECT_INTERVAL = int(os.environ.get("TICK_DETECT_INTERVAL", "60"))

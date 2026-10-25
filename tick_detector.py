@@ -251,7 +251,9 @@ def set_influence(cursor, system_id, faction, influence, msg_time):
     """Store or update influence data, matching the original algorithm."""
     msg_time_str = msg_time.strftime("%Y-%m-%d %H:%M:%S")
 
-    # Check if we already have this exact influence value for this system/faction
+    # Check if we already have this exact influence value for this system/faction.
+    # Match the ORIGINAL Node algorithm (detector.js setInfluence): select the
+    # most-recent matching row for (system, faction, influence).
     cursor.execute("""
         SELECT id, first_seen, last_seen
         FROM influence
@@ -264,32 +266,34 @@ def set_influence(cursor, system_id, faction, influence, msg_time):
 
     if row:
         row_id, first_seen, last_seen = row
-        # IMPORTANT: match the original Node algorithm's observation-window
-        # semantics. An influence value's observation window must stay pinned
-        # to when that value was genuinely active. We must NOT drag last_seen
-        # forward every time the same value is re-reported: doing so makes
-        # successive influence rows overlap in time, which corrupts the
-        # chronological ordering that update_delta relies on (producing huge
-        # and even negative deltas) and stops any row qualifying for tick
-        # detection.
+        # Faithful port of the Node behaviour (detector.js):
         #
-        # So:
-        #   - A late-arriving message OLDER than first_seen extends the window
-        #     backwards (genuinely new information about when the value began).
-        #   - A late-arriving message that falls between first_seen and
-        #     last_seen just increments the observation count.
-        #   - A message NEWER than last_seen (the overwhelmingly common case)
-        #     does NOT move last_seen. We bump the count for observability but
-        #     leave the window and deltas untouched.
-        if msg_time_str < str(first_seen):
+        #   diff = last_seen - incoming_time
+        #   if diff > 0:  # incoming is OLDER than the stored last_seen
+        #       UPDATE SET first_seen = first_seen, last_seen = incoming,
+        #                  count = count + 1, delta = NULL
+        #       update_delta(...)
+        #
+        # i.e. the observation window's END (last_seen) is only ever pulled
+        # BACKWARD, to the oldest observation of this value, and never dragged
+        # forward. A newer repeat of the same value does nothing at all (no
+        # count bump, no window change, no delta recompute) — last_seen stays
+        # pinned. This pinning is what keeps `delta` meaningful: delta of the
+        # NEXT distinct value = next.first_seen - this.last_seen, so last_seen
+        # must stay close to when this value was genuinely active, not creep
+        # toward "now".
+        #
+        # (The earlier Python port both extended first_seen backward AND
+        # dragged last_seen forward on every repeat, then always recomputed
+        # delta. The forward creep made successive rows overlap and produced
+        # the huge/negative deltas that broke detection.)
+        if msg_time_str < str(last_seen):
             cursor.execute("""
-                UPDATE influence SET first_seen = %s, count = count + 1, delta = NULL
+                UPDATE influence SET last_seen = %s, count = count + 1, delta = NULL
                 WHERE id = %s
             """, (msg_time_str, row_id))
             update_delta(cursor, system_id, faction)
-        else:
-            # Within the existing window, or newer than last_seen: just count it.
-            cursor.execute("UPDATE influence SET count = count + 1 WHERE id = %s", (row_id,))
+        # else: newer repeat — Node does nothing. Leave the row untouched.
     else:
         # New influence value for this system/faction
         cursor.execute("""
